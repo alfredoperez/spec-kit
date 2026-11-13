@@ -82,8 +82,37 @@ Declare only contributions you need so the preset composes with others.
 For `wrap`, the content file must contain `{CORE_TEMPLATE}` for templates
 and commands, or `$CORE_SCRIPT` for scripts. These placeholders stand for the
 resolved lower-priority content, not necessarily unmodified core content.
-An append, prepend, or wrap contribution needs a lower `replace` base;
-a new self-contained command normally uses `replace`.
+An append, prepend, wrap, or replace-section contribution needs a lower
+`replace` base; a new self-contained command normally uses `replace`.
+
+### Replace one section of a template
+
+To change a single section and keep the rest of the template current, use
+`replace-section` and name the section's heading:
+
+```yaml
+provides:
+  templates:
+    - type: "template"
+      name: "spec-template"
+      file: "templates/outcomes.md"
+      strategy: "replace-section"
+      section: "User Scenarios & Testing"
+```
+
+The content file holds the new body of that section, without its heading.
+The heading line stays; the body is replaced up to the next heading of the
+same or higher level, so the section's subsections go with it. `section`
+matches the heading text after the `#` marks exactly (case-sensitive,
+surrounding whitespace ignored), at any heading level. Headings inside fenced
+code blocks do not count.
+
+Exactly one heading must match. When none does, or several do, resolution
+fails with an error that lists the template's headings, so a renamed upstream
+section fails loudly instead of being guessed at. Several presets can each
+replace a different section of the same template; they apply in priority
+order like the other composing strategies. `replace-section` is available for
+templates only.
 
 Declare extension dependencies in `preset.yml` when the preset relies on
 extension capabilities. A namespace alone does not establish a dependency

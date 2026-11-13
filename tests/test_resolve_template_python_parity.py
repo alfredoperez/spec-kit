@@ -1433,6 +1433,7 @@ def test_python_variant_skips_yaml_probe_for_manifest_less_preset(
     assert python_common._preset_template_layer(preset_dir, TEMPLATE) == (
         conventional,
         "replace",
+        "",
     )
 
 
@@ -1587,6 +1588,33 @@ def test_bash_fails_when_override_read_fails(tmp_path: Path) -> None:
       file: templates/other.md
       strategy: merge
 """,
+        f"""provides:
+  templates:
+    - type: template
+      name: {TEMPLATE}
+      file: templates/{TEMPLATE}.md
+      strategy: replace-section
+""",
+        f"""provides:
+  templates:
+    - type: template
+      name: {TEMPLATE}
+      file: templates/{TEMPLATE}.md
+      strategy: replace-section
+      section: "Two\\nlines"
+""",
+        f"""provides:
+  templates:
+    - type: template
+      name: {TEMPLATE}
+      file: templates/{TEMPLATE}.md
+      strategy: wrap
+    - type: script
+      name: create-new-feature
+      file: scripts/create-new-feature.sh
+      strategy: replace-section
+      section: Main
+""",
     ],
     ids=[
         "invalid_yaml",
@@ -1602,6 +1630,9 @@ def test_bash_fails_when_override_read_fails(tmp_path: Path) -> None:
         "entry_missing_file",
         "unsupported_type",
         "unsupported_strategy",
+        "replace_section_without_section",
+        "replace_section_multiline_section",
+        "replace_section_on_script",
     ],
 )
 def test_all_variants_fail_for_malformed_preset_manifest(
@@ -1622,3 +1653,117 @@ def test_all_variants_fail_for_malformed_preset_manifest(
 
     assert all(result.returncode != 0 for result in results)
     assert all(result.stdout == "" for result in results)
+
+
+_SECTION_CORE = (
+    "# Constitution\n"
+    "\n"
+    "## Café Principles\n"
+    "\n"
+    "Stock principles.\n"
+    "\n"
+    "```markdown\n"
+    "## Governance\n"
+    "```\n"
+    "\n"
+    "### Sub\n"
+    "\n"
+    "Sub text.\n"
+    "\n"
+    "## Governance\n"
+    "\n"
+    "Stock governance.\n"
+)
+
+
+def _install_section_preset(
+    repo: Path, preset_id: str, section: str, body: str
+) -> None:
+    preset = repo / ".specify" / "presets" / preset_id
+    (preset / "templates").mkdir(parents=True)
+    (preset / "templates" / "body.md").write_bytes(body.encode("utf-8"))
+    (preset / "preset.yml").write_bytes(
+        (
+            "provides:\n"
+            "  templates:\n"
+            "    - type: template\n"
+            f"      name: {TEMPLATE}\n"
+            "      file: templates/body.md\n"
+            "      strategy: replace-section\n"
+            f'      section: "{section}"\n'
+        ).encode("utf-8")
+    )
+
+
+def _section_repo(tmp_path: Path, presets: list[tuple[str, str, str]]) -> Path:
+    repo = make_repo(tmp_path)
+    install_scripts(repo, SCRIPT)
+    templates = repo / ".specify" / "templates"
+    templates.mkdir(parents=True)
+    (templates / f"{TEMPLATE}.md").write_bytes(_SECTION_CORE.encode("utf-8"))
+    registry = {}
+    for priority, (preset_id, section, body) in enumerate(presets, start=1):
+        _install_section_preset(repo, preset_id, section, body)
+        registry[preset_id] = {"enabled": True, "priority": priority}
+    (repo / ".specify" / "presets" / ".registry").write_text(
+        json.dumps({"presets": registry}), encoding="utf-8"
+    )
+    return repo
+
+
+def _all_variants(repo: Path) -> list[subprocess.CompletedProcess[str]]:
+    results = [
+        run(bash_cmd(repo, SCRIPT, TEMPLATE, "--json"), repo),
+        run(py_cmd(repo, SCRIPT, TEMPLATE, "--json"), repo),
+    ]
+    if HAS_POWERSHELL:
+        results.append(run(ps_cmd(repo, SCRIPT, TEMPLATE, "-Json"), repo))
+    return results
+
+
+@requires_bash
+def test_all_variants_match_cli_for_replace_section(tmp_path: Path) -> None:
+    from specify_cli.presets._section import replace_section
+
+    # Highest priority first: the lower preset applies first, as in the CLI.
+    presets = [
+        ("governance", "Governance", "New governance.\n"),
+        ("principles", "Café Principles", "\n- One\n- Two\n\n"),
+    ]
+    repo = _section_repo(tmp_path, presets)
+    expected = _SECTION_CORE
+    for preset_id, section, body in reversed(presets):
+        expected = replace_section(expected, section, body, preset_id)
+
+    results = _all_variants(repo)
+
+    assert "Stock principles." not in expected
+    assert "```markdown\n" not in expected
+    assert expected.endswith("## Governance\n\nNew governance.\n")
+    assert all(result.returncode == 0 for result in results), [
+        r.stderr for r in results
+    ]
+    assert all(
+        json_stdout(result)["TEMPLATE_CONTENT"] == expected for result in results
+    )
+
+
+@requires_bash
+@pytest.mark.parametrize(
+    "core_suffix,section",
+    [("", "Missing"), ("## Governance\n\nAgain.\n", "Governance")],
+    ids=["no_match", "two_matches"],
+)
+def test_all_variants_fail_when_section_is_not_unique(
+    tmp_path: Path, core_suffix: str, section: str
+) -> None:
+    repo = _section_repo(tmp_path, [("p", section, "x\n")])
+    core = repo / ".specify" / "templates" / f"{TEMPLATE}.md"
+    core.write_bytes((_SECTION_CORE + core_suffix).encode("utf-8"))
+
+    results = _all_variants(repo)
+
+    assert all(result.returncode != 0 for result in results)
+    assert all(result.stdout == "" for result in results)
+    assert all(f"'{section}'" in result.stderr for result in results)
+    assert all("## Café Principles" in result.stderr for result in results)

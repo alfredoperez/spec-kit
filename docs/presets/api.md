@@ -58,6 +58,7 @@ provides:
 | `file` | Yes | Relative path within the preset, with no parent traversal |
 | `description` | No | Contribution description |
 | `strategy` | No | Defaults to `replace`; accepted strings are normalized to lowercase |
+| `section` | With `replace-section` | Heading text of the one section to replace; a non-empty, single-line string |
 
 Template and script names use lowercase letters, digits, and hyphens.
 Command names additionally permit dots; use names such as `speckit.specify`
@@ -138,17 +139,23 @@ against core commands even when a project does not have a
 
 ### Composition strategies
 
-| Type | `replace` | `prepend` | `append` | `wrap` |
-| --- | --- | --- | --- | --- |
-| Template | Default | Supported | Supported | `{CORE_TEMPLATE}` |
-| Command | Default | Supported | Supported | `{CORE_TEMPLATE}` |
-| Script | Default | Not supported | Not supported | `$CORE_SCRIPT` |
+| Type | `replace` | `prepend` | `append` | `wrap` | `replace-section` |
+| --- | --- | --- | --- | --- | --- |
+| Template | Default | Supported | Supported | `{CORE_TEMPLATE}` | Requires `section` |
+| Command | Default | Supported | Supported | `{CORE_TEMPLATE}` | Not supported |
+| Script | Default | Not supported | Not supported | `$CORE_SCRIPT` | Not supported |
 
 A highest-precedence `replace` layer wins entirely. Otherwise, resolution
 finds the nearest lower `replace` base and applies only the layers above it,
 bottom-up. Prepend and append separate the two contents with a blank line.
 The wrapper placeholder is replaced with the effective lower content,
 which may already contain other preset customizations.
+
+`replace-section` keeps the heading whose text equals `section` and replaces
+its body, up to the next heading of the same or higher level, with the
+contribution's content. Matching ignores surrounding whitespace and headings
+inside fenced code blocks. Zero or more than one match raises a preset
+validation error that names the section and lists the template's headings.
 
 Without a `replace` base, composition cannot produce output. Command
 registration warns and skips an uncomposable command rather than requiring

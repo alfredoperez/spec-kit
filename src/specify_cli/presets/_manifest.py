@@ -27,7 +27,7 @@ class PresetCompatibilityError(PresetError):
 
 
 VALID_PRESET_TEMPLATE_TYPES = {"template", "command", "script"}
-VALID_PRESET_STRATEGIES = {"replace", "prepend", "append", "wrap"}
+VALID_PRESET_STRATEGIES = {"replace", "prepend", "append", "wrap", "replace-section"}
 # Scripts only support replace and wrap (prepend/append don't make semantic sense for executable code)
 VALID_SCRIPT_STRATEGIES = {"replace", "wrap"}
 
@@ -263,6 +263,25 @@ class PresetManifest:
                     f"Invalid strategy '{strategy}' for script: "
                     f"scripts only support {sorted(VALID_SCRIPT_STRATEGIES)}"
                 )
+            if strategy == "replace-section":
+                if tmpl["type"] != "template":
+                    raise PresetValidationError(
+                        f"Invalid strategy 'replace-section' for {tmpl['type']}: "
+                        "only templates support it"
+                    )
+                section = tmpl.get("section")
+                # The shell resolvers pass the section as a tab-separated
+                # field, and a heading is one line, so neither may appear.
+                if (
+                    not isinstance(section, str)
+                    or not section.strip()
+                    or any(ch in section for ch in "\t\r\n")
+                ):
+                    raise PresetValidationError(
+                        f"Template '{tmpl['name']}' uses strategy 'replace-section' "
+                        "and needs 'section': the heading text of one section, "
+                        "on a single line"
+                    )
 
             # Validate template name format
             if tmpl["type"] == "command":

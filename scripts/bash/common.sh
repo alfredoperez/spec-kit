@@ -617,6 +617,65 @@ except Exception:
     return 1
 }
 
+# Print <base file> with the body of the one section titled <section> replaced
+# by <layer file>, keeping its heading. Mirrors
+# src/specify_cli/presets/_section.py; the parity tests hold them together.
+# Usage: _replace_template_section <section> <layer file> <base file> <python...>
+_replace_template_section() {
+    local section="$1" layer="$2" base="$3"
+    shift 3
+    "$@" - "$section" "$layer" "$base" <<'PY'
+import re
+import sys
+
+section, layer_path, base_path = sys.argv[1:4]
+with open(base_path, 'rb') as f:
+    text = f.read().decode('utf-8')
+with open(layer_path, 'rb') as f:
+    body = f.read().decode('utf-8')
+heading_re = re.compile(r'^(#{1,6})(?:[ \t]+(.*))?$')
+fence_re = re.compile(r'^ {0,3}(`{3,}|~{3,})(.*)$')
+lines = text.splitlines(keepends=True)
+headings = []
+fence = None
+for index, raw in enumerate(lines):
+    line = raw.rstrip('\r\n')
+    fm = fence_re.match(line)
+    if fence is not None:
+        if fm and fm.group(1)[0] == fence[0] and len(fm.group(1)) >= len(fence) and not fm.group(2).strip():
+            fence = None
+        continue
+    if fm:
+        fence = fm.group(1)
+        continue
+    hm = heading_re.match(line)
+    if hm:
+        headings.append((index, len(hm.group(1)), (hm.group(2) or '').strip()))
+wanted = section.strip()
+matches = [h for h in headings if h[2] == wanted]
+if len(matches) != 1:
+    problem = 'not found' if not matches else 'matches %d headings' % len(matches)
+    available = ', '.join('#' * lvl + ' ' + title for _, lvl, title in headings) or 'none'
+    msg = "Error: replace-section in '%s': section '%s' %s in the template. Headings: %s\n" % (layer_path, wanted, problem, available)
+    sys.stderr.buffer.write(msg.encode('utf-8'))
+    sys.exit(3)
+index, level, _ = matches[0]
+end = len(lines)
+for later_index, later_level, _ in headings:
+    if later_index > index and later_level <= level:
+        end = later_index
+        break
+head = ''.join(lines[:index + 1])
+if not head.endswith('\n'):
+    head += '\n'
+new_body = body.strip('\r\n')
+result = head + ('\n' + new_body + '\n' if new_body else '')
+if end < len(lines):
+    result += '\n' + ''.join(lines[end:])
+sys.stdout.buffer.write(result.encode('utf-8'))
+PY
+}
+
 # Resolve a template name to composed content using composition strategies.
 # Reads strategy metadata from preset manifests and composes content
 # from multiple layers using prepend, append, or wrap strategies.
@@ -633,6 +692,7 @@ resolve_template_content() {
     # Collect all layers (highest priority first)
     local -a layer_paths=()
     local -a layer_strategies=()
+    local -a layer_sections=()
 
     # Priority 1: Project overrides (always "replace")
     local override="$base/overrides/${template_name}.md"
@@ -695,6 +755,7 @@ except Exception:
             while IFS= read -r preset_id; do
                 local strategy="replace"
                 local manifest_file=""
+                local manifest_section=""
                 local manifest="$presets_dir/$preset_id/preset.yml"
                 local manifest_declared=false
                 if [ -f "$manifest" ]; then
@@ -731,7 +792,7 @@ try:
     if not templates:
         raise ValueError('manifest must provide at least one template')
     valid_types = ('template', 'command', 'script')
-    valid_strategies = ('replace', 'prepend', 'append', 'wrap')
+    valid_strategies = ('replace', 'prepend', 'append', 'wrap', 'replace-section')
     for t in templates:
         if not isinstance(t, dict):
             raise ValueError('manifest template entries must be mappings')
@@ -750,11 +811,18 @@ try:
             raise ValueError('invalid manifest template strategy')
         if t['type'] == 'script' and strategy not in ('replace', 'wrap'):
             raise ValueError('invalid manifest script strategy')
+        if strategy == 'replace-section':
+            section = t.get('section')
+            if t['type'] != 'template':
+                raise ValueError('replace-section is only valid for templates')
+            if not isinstance(section, str) or not section.strip() or any(ch in section for ch in '\t\r\n'):
+                raise ValueError('replace-section needs a single-line section')
     for t in templates:
         if t.get('name') == os.environ['SPECKIT_TMPL'] and t.get('type', 'template') == 'template':
             file_value = t.get('file', '')
             strategy = t.get('strategy', 'replace')
-            print('found\t' + strategy + '\t' + file_value)
+            section = t.get('section', '') if strategy.lower() == 'replace-section' else ''
+            sys.stdout.buffer.write(('found\t' + strategy + '\t' + file_value + '\t' + section + '\n').encode('utf-8'))
             sys.exit(0)
     print('absent\treplace\t')
 except Exception as exc:
@@ -776,7 +844,7 @@ except Exception as exc:
                     fi
                     if [ -n "$result" ]; then
                         local declaration
-                        IFS=$'\t' read -r declaration strategy manifest_file <<< "$result"
+                        IFS=$'\t' read -r declaration strategy manifest_file manifest_section <<< "$result"
                         [ "$declaration" = "found" ] && manifest_declared=true
                         strategy=$(printf '%s' "$strategy" | tr '[:upper:]' '[:lower:]')
                     fi
@@ -804,6 +872,7 @@ except Exception as exc:
                 if [ -n "$candidate" ]; then
                     layer_paths+=("$candidate")
                     layer_strategies+=("$strategy")
+                    layer_sections+=("$manifest_section")
                     if [ "$strategy" = "replace" ]; then
                         effective_base_found=true
                         break
@@ -828,6 +897,7 @@ except Exception as exc:
             if [ -f "$candidate" ]; then
                 layer_paths+=("$candidate")
                 layer_strategies+=("replace")
+                layer_sections+=("")
                 effective_base_found=true
                 break
             fi
@@ -839,6 +909,7 @@ except Exception as exc:
     if [ "$effective_base_found" = false ] && [ -f "$core" ]; then
         layer_paths+=("$core")
         layer_strategies+=("replace")
+        layer_sections+=("")
     fi
 
     local count=${#layer_paths[@]}
@@ -932,6 +1003,17 @@ except Exception as exc:
                     rest="${rest#*\{CORE_TEMPLATE\}}"
                 done
                 content="${wrapped}${rest}"
+                ;;
+            replace-section)
+                local base_file replaced
+                base_file=$(mktemp)
+                printf '%s' "$content" > "$base_file"
+                if ! replaced=$(_replace_template_section "${layer_sections[$i]}" "$path" "$base_file" "${python_cmd[@]}"; status=$?; printf x; exit "$status"); then
+                    rm -f "$base_file"
+                    return 2
+                fi
+                rm -f "$base_file"
+                content="${replaced%x}"
                 ;;
             *) echo "Error: unknown strategy '$strat'" >&2; return 2 ;;
         esac

@@ -10,6 +10,7 @@ from .._utils import dump_frontmatter
 from ..extensions import ExtensionRegistry, normalize_priority
 from ._manifest import VALID_PRESET_STRATEGIES, PresetManifest, PresetValidationError
 from ._registry import PresetRegistry
+from ._section import replace_section
 
 
 class PresetResolver:
@@ -512,7 +513,8 @@ class PresetResolver:
         """Collect all layers in the priority stack for a template.
 
         Returns layers from highest priority (checked first) to lowest priority.
-        Each layer is a dict with 'path', 'source', and 'strategy' keys.
+        Each layer is a dict with 'path', 'source', and 'strategy' keys;
+        preset layers also carry 'section' (used by replace-section).
 
         Args:
             template_name: Template name (e.g., "spec-template")
@@ -601,7 +603,11 @@ class PresetResolver:
                                     fm_data = yaml.safe_load(fm_text)
                                     if isinstance(fm_data, dict):
                                         fm_strategy = fm_data.get("strategy")
-                                        if isinstance(fm_strategy, str) and fm_strategy.lower() in VALID_PRESET_STRATEGIES:
+                                        if (
+                                            isinstance(fm_strategy, str)
+                                            and fm_strategy.lower() in VALID_PRESET_STRATEGIES
+                                            and fm_strategy.lower() != "replace-section"
+                                        ):
                                             strategy = fm_strategy.lower()
                         except (UnicodeDecodeError, yaml.YAMLError, OSError):
                             # Best-effort legacy frontmatter parsing: keep default
@@ -612,6 +618,7 @@ class PresetResolver:
                         "path": candidate,
                         "source": f"{pack_id} v{version}",
                         "strategy": strategy,
+                        "section": entry.get("section") if entry is not None else None,
                     })
 
         # Priority 3: Extension-provided templates (always "replace")
@@ -745,6 +752,8 @@ class PresetResolver:
         - append: content is placed after lower-priority content
         - wrap: content contains {CORE_TEMPLATE} placeholder replaced
                 with lower-priority content (or $CORE_SCRIPT for scripts)
+        - replace-section: content replaces the body of the one section of
+                lower-priority content whose heading matches the layer's section
 
         Composition is recursive — multiple composing presets chain.
 
@@ -902,6 +911,10 @@ class PresetResolver:
                         f"lower-priority content should be inserted."
                     )
                 content = layer_content.replace(placeholder, content)
+            elif strategy == "replace-section":
+                content = replace_section(
+                    content, layer["section"], layer_content, layer["source"]
+                )
 
         # Reattach the highest-priority frontmatter for commands,
         # inheriting scripts/agent_scripts from the base if missing

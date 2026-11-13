@@ -176,7 +176,7 @@ arrays. Each array preserves manifest declaration order and contains:
 | `description` | Description, or `""` when absent or empty |
 | `source` | `{"layer":"preset","presetId":"<id>"}` identifying the contributing preset |
 | `sourcePath` | Manifest `file` path, relative to the installed preset |
-| `strategy` | `replace`, `prepend`, `append`, or `wrap`; `replace` if omitted |
+| `strategy` | `replace`, `prepend`, `append`, `wrap`, or `replace-section`; `replace` if omitted |
 
 `--json` cannot be combined with `--versions` (usage error, exit `2`).
 A preset that is not installed, including one only in a catalog, or a

@@ -360,8 +360,68 @@ class TemplateResolutionError(RuntimeError):
 # Mirror the canonical PresetManifest contract (see src/specify_cli/presets)
 # so runtime resolution rejects the same structurally malformed manifests.
 _VALID_TEMPLATE_TYPES = ("template", "command", "script")
-_VALID_TEMPLATE_STRATEGIES = ("replace", "prepend", "append", "wrap")
+_VALID_TEMPLATE_STRATEGIES = ("replace", "prepend", "append", "wrap", "replace-section")
 _VALID_SCRIPT_STRATEGIES = ("replace", "wrap")
+
+# Mirrors src/specify_cli/presets/_section.py; the parity tests hold them together.
+_HEADING_RE = re.compile(r"^(#{1,6})(?:[ \t]+(.*))?$")
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _scan_headings(lines: list[str]) -> list[tuple[int, int, str]]:
+    headings: list[tuple[int, int, str]] = []
+    fence: str | None = None
+    for index, raw in enumerate(lines):
+        line = raw.rstrip("\r\n")
+        fence_match = _FENCE_RE.match(line)
+        if fence is not None:
+            if (
+                fence_match
+                and fence_match.group(1)[0] == fence[0]
+                and len(fence_match.group(1)) >= len(fence)
+                and not fence_match.group(2).strip()
+            ):
+                fence = None
+            continue
+        if fence_match:
+            fence = fence_match.group(1)
+            continue
+        heading_match = _HEADING_RE.match(line)
+        if heading_match:
+            title = (heading_match.group(2) or "").strip()
+            headings.append((index, len(heading_match.group(1)), title))
+    return headings
+
+
+def replace_section(text: str, section: str, body: str, source: str) -> str:
+    """Replace the body of the one section titled *section*, keeping its heading."""
+    lines = text.splitlines(keepends=True)
+    headings = _scan_headings(lines)
+    wanted = section.strip()
+    matches = [h for h in headings if h[2] == wanted]
+    if len(matches) != 1:
+        problem = "not found" if not matches else f"matches {len(matches)} headings"
+        available = ", ".join(
+            f"{'#' * level} {title}" for _, level, title in headings
+        ) or "none"
+        raise TemplateResolutionError(
+            f"replace-section in '{source}': section '{wanted}' {problem} "
+            f"in the template. Headings: {available}"
+        )
+    index, level, _ = matches[0]
+    end = len(lines)
+    for later_index, later_level, _ in headings:
+        if later_index > index and later_level <= level:
+            end = later_index
+            break
+    head = "".join(lines[: index + 1])
+    if not head.endswith("\n"):
+        head += "\n"
+    new_body = body.strip("\r\n")
+    result = head + ("\n" + new_body + "\n" if new_body else "")
+    if end < len(lines):
+        result += "\n" + "".join(lines[end:])
+    return result
 
 
 def _validate_manifest_template_entry(entry: object) -> None:
@@ -385,6 +445,16 @@ def _validate_manifest_template_entry(entry: object) -> None:
         raise ValueError(
             f"invalid manifest script strategy '{strategy}'"
         )
+    if strategy == "replace-section":
+        section = entry.get("section")
+        if entry["type"] != "template":
+            raise ValueError("replace-section is only valid for templates")
+        if (
+            not isinstance(section, str)
+            or not section.strip()
+            or any(ch in section for ch in "\t\r\n")
+        ):
+            raise ValueError("replace-section needs a single-line 'section'")
 
 
 class _DelegatedYAMLError(Exception):
@@ -466,7 +536,7 @@ class _DelegatedYAML:
                     "    if not isinstance(entry, dict):\n"
                     "        return _default(entry)\n"
                     "    fields = {}\n"
-                    "    for k in ('type', 'name', 'file', 'strategy'):\n"
+                    "    for k in ('type', 'name', 'file', 'strategy', 'section'):\n"
                     "        if k not in entry:\n"
                     "            continue\n"
                     "        v = entry[k]\n"
@@ -554,13 +624,13 @@ def _import_yaml() -> object | None:
 
 def _preset_template_layer(
     preset_dir: Path, template_name: str
-) -> tuple[Path, str] | None:
-    """Return the preset template path and composition strategy."""
+) -> tuple[Path, str, str] | None:
+    """Return the preset template path, composition strategy and section."""
     manifest_path = preset_dir / "preset.yml"
     conventional = _conventional_template(preset_dir, template_name)
 
     if not manifest_path.is_file():
-        return (conventional, "replace") if conventional is not None else None
+        return (conventional, "replace", "") if conventional is not None else None
 
     yaml = _import_yaml()
     if yaml is None:
@@ -600,13 +670,13 @@ def _preset_template_layer(
             candidate = preset_dir / relative
             if not candidate.is_file():
                 return None
-            return candidate, strategy.lower()
+            return candidate, strategy.lower(), entry.get("section", "")
     except (OSError, UnicodeError, ValueError, yaml.YAMLError) as exc:
         raise TemplateResolutionError(
             f"Failed to parse preset manifest {manifest_path}: {exc}"
         ) from exc
 
-    return (conventional, "replace") if conventional is not None else None
+    return (conventional, "replace", "") if conventional is not None else None
 
 
 def resolve_template_content(template_name: str, repo_root: Path) -> str | None:
@@ -614,12 +684,12 @@ def resolve_template_content(template_name: str, repo_root: Path) -> str | None:
     if not _is_safe_component(template_name):
         return None
 
-    layers: list[tuple[Path, str]] = []
+    layers: list[tuple[Path, str, str]] = []
 
     def compose_from_base() -> str:
         try:
             content = layers[-1][0].read_bytes().decode("utf-8")
-            for path, strategy in reversed(layers[:-1]):
+            for path, strategy, section in reversed(layers[:-1]):
                 layer_content = path.read_bytes().decode("utf-8")
                 if strategy == "prepend":
                     content = f"{layer_content}\n\n{content}"
@@ -632,6 +702,10 @@ def resolve_template_content(template_name: str, repo_root: Path) -> str | None:
                             f"Wrap layer {path} is missing {placeholder}"
                         )
                     content = layer_content.replace(placeholder, content)
+                elif strategy == "replace-section":
+                    content = replace_section(
+                        content, section, layer_content, str(path)
+                    )
                 else:
                     raise TemplateResolutionError(
                         f"Unknown template composition strategy '{strategy}' in {path}"
@@ -650,7 +724,7 @@ def resolve_template_content(template_name: str, repo_root: Path) -> str | None:
         / f"{template_name}.md"
     )
     if override.is_file():
-        layers.append((override, "replace"))
+        layers.append((override, "replace", ""))
         return compose_from_base()
 
     presets_dir = repo_root / ".specify" / "presets"
@@ -666,12 +740,12 @@ def resolve_template_content(template_name: str, repo_root: Path) -> str | None:
         extension_dir = extensions_dir / extension_id
         candidate = _conventional_template(extension_dir, template_name)
         if candidate is not None:
-            layers.append((candidate, "replace"))
+            layers.append((candidate, "replace", ""))
             return compose_from_base()
 
     core = repo_root / ".specify" / "templates" / f"{template_name}.md"
     if core.is_file():
-        layers.append((core, "replace"))
+        layers.append((core, "replace", ""))
         return compose_from_base()
 
     if not layers:

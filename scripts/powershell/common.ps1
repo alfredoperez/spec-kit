@@ -526,6 +526,84 @@ function Resolve-Template {
     return $null
 }
 
+# Replace the body of the one section titled $Section in $Content with the
+# layer file, keeping its heading. Mirrors src/specify_cli/presets/_section.py;
+# the parity tests hold them together.
+function Invoke-ReplaceTemplateSection {
+    param(
+        [Parameter(Mandatory=$true)][AllowEmptyString()][string]$Content,
+        [Parameter(Mandatory=$true)][string]$Section,
+        [Parameter(Mandatory=$true)][string]$LayerPath,
+        [Parameter(Mandatory=$true)][object[]]$PyCmd
+    )
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $baseFile = [System.IO.Path]::GetTempFileName()
+    $outFile = [System.IO.Path]::GetTempFileName()
+    $errFile = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($baseFile, $Content, $utf8)
+        $pyArgs = if ($PyCmd.Count -gt 1) { $PyCmd[1..($PyCmd.Count-1)] } else { @() }
+        & $PyCmd[0] @pyArgs -c @'
+import re, sys
+section, layer_path, base_path, out_path, err_path = sys.argv[1:6]
+with open(base_path, 'rb') as f:
+    text = f.read().decode('utf-8')
+with open(layer_path, 'rb') as f:
+    body = f.read().decode('utf-8')
+heading_re = re.compile(r'^(#{1,6})(?:[ \t]+(.*))?$')
+fence_re = re.compile(r'^ {0,3}(`{3,}|~{3,})(.*)$')
+lines = text.splitlines(keepends=True)
+headings = []
+fence = None
+for index, raw in enumerate(lines):
+    line = raw.rstrip('\r\n')
+    fm = fence_re.match(line)
+    if fence is not None:
+        if fm and fm.group(1)[0] == fence[0] and len(fm.group(1)) >= len(fence) and not fm.group(2).strip():
+            fence = None
+        continue
+    if fm:
+        fence = fm.group(1)
+        continue
+    hm = heading_re.match(line)
+    if hm:
+        headings.append((index, len(hm.group(1)), (hm.group(2) or '').strip()))
+wanted = section.strip()
+matches = [h for h in headings if h[2] == wanted]
+if len(matches) != 1:
+    problem = 'not found' if not matches else 'matches %d headings' % len(matches)
+    available = ', '.join('#' * lvl + ' ' + title for _, lvl, title in headings) or 'none'
+    msg = 'replace-section in %r: section %r %s in the template. Headings: %s' % (layer_path, wanted, problem, available)
+    with open(err_path, 'wb') as f:
+        f.write(msg.encode('utf-8'))
+    sys.exit(3)
+index, level, _ = matches[0]
+end = len(lines)
+for later_index, later_level, _ in headings:
+    if later_index > index and later_level <= level:
+        end = later_index
+        break
+head = ''.join(lines[:index + 1])
+if not head.endswith('\n'):
+    head += '\n'
+new_body = body.strip('\r\n')
+result = head + ('\n' + new_body + '\n' if new_body else '')
+if end < len(lines):
+    result += '\n' + ''.join(lines[end:])
+with open(out_path, 'wb') as f:
+    f.write(result.encode('utf-8'))
+'@ $Section $LayerPath $baseFile $outFile $errFile
+        if ($LASTEXITCODE -ne 0) {
+            $message = [System.IO.File]::ReadAllText($errFile, $utf8)
+            if (-not $message) { $message = "replace-section failed for $LayerPath" }
+            throw $message
+        }
+        return [System.IO.File]::ReadAllText($outFile, $utf8)
+    } finally {
+        Remove-Item -LiteralPath $baseFile, $outFile, $errFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # Resolve a template name to composed content using composition strategies.
 # Reads strategy metadata from preset manifests and composes content
 # from multiple layers using prepend, append, or wrap strategies.
@@ -544,6 +622,7 @@ function Resolve-TemplateContent {
     # Collect all layers (highest priority first)
     $layerPaths = @()
     $layerStrategies = @()
+    $layerSections = @()
 
     # Priority 1: Project overrides (always "replace")
     $override = Join-Path $base "overrides/$TemplateName.md"
@@ -613,6 +692,7 @@ function Resolve-TemplateContent {
                 # Read strategy and file path from preset manifest
                 $strategy = 'replace'
                 $manifestFilePath = ''
+                $manifestSection = ''
                 $manifestDeclared = $false
                 $manifest = Join-Path $presetsDir "$presetId/preset.yml"
                 if ((Test-Path -LiteralPath $manifest) -and -not $pyCmd) {
@@ -624,7 +704,7 @@ function Resolve-TemplateContent {
                         $pyArgs = if ($pyCmd.Count -gt 1) { $pyCmd[1..($pyCmd.Count-1)] } else { @() }
                         $pyStderrFile = [System.IO.Path]::GetTempFileName()
                         $stratResult = & $pyCmd[0] @pyArgs -c @"
-import sys
+import json, sys
 try:
     import yaml
 except ImportError:
@@ -648,7 +728,7 @@ try:
     if not templates:
         raise ValueError('manifest must provide at least one template')
     valid_types = ('template', 'command', 'script')
-    valid_strategies = ('replace', 'prepend', 'append', 'wrap')
+    valid_strategies = ('replace', 'prepend', 'append', 'wrap', 'replace-section')
     for t in templates:
         if not isinstance(t, dict):
             raise ValueError('manifest template entries must be mappings')
@@ -667,11 +747,18 @@ try:
             raise ValueError('invalid manifest template strategy')
         if t['type'] == 'script' and strategy not in ('replace', 'wrap'):
             raise ValueError('invalid manifest script strategy')
+        if strategy == 'replace-section':
+            section = t.get('section')
+            if t['type'] != 'template':
+                raise ValueError('replace-section is only valid for templates')
+            if not isinstance(section, str) or not section.strip() or any(ch in section for ch in '\t\r\n'):
+                raise ValueError('replace-section needs a single-line section')
     for t in templates:
         if t.get('name') == sys.argv[2] and t.get('type', 'template') == 'template':
             file_value = t.get('file', '')
             strategy = t.get('strategy', 'replace')
-            print('found\t' + strategy + '\t' + file_value)
+            section = t.get('section', '') if strategy.lower() == 'replace-section' else ''
+            print('found\t' + strategy + '\t' + file_value + '\t' + json.dumps(section))
             sys.exit(0)
     print('absent\treplace\t')
 except Exception as exc:
@@ -685,10 +772,11 @@ except Exception as exc:
                             throw "Invalid preset manifest $manifest"
         }
                         if ($stratResult) {
-                            $parts = $stratResult.Trim() -split "`t", 3
+                            $parts = $stratResult.Trim() -split "`t", 4
                             $manifestDeclared = $parts[0] -eq 'found'
                             $strategy = $parts[1].ToLowerInvariant()
                             if ($parts.Count -gt 2 -and $parts[2]) { $manifestFilePath = $parts[2] }
+                            if ($parts.Count -gt 3 -and $parts[3]) { $manifestSection = $parts[3] | ConvertFrom-Json }
                         }
                         Remove-Item -LiteralPath $pyStderrFile -Force -ErrorAction SilentlyContinue
                     } catch {
@@ -719,6 +807,7 @@ except Exception as exc:
                 if ($candidate) {
                     $layerPaths += $candidate
                     $layerStrategies += $strategy
+                    $layerSections += $manifestSection
                     if ($strategy -eq 'replace') {
                         $effectiveBaseFound = $true
                         break
@@ -738,6 +827,7 @@ except Exception as exc:
             if (Test-Path -LiteralPath $candidate) {
                 $layerPaths += $candidate
                 $layerStrategies += 'replace'
+                $layerSections += ''
                 $effectiveBaseFound = $true
                 break
             }
@@ -749,6 +839,7 @@ except Exception as exc:
     if (-not $effectiveBaseFound -and (Test-Path -LiteralPath $core)) {
         $layerPaths += $core
         $layerStrategies += 'replace'
+        $layerSections += ''
     }
 
     if ($layerPaths.Count -eq 0) { return $null }
@@ -804,6 +895,9 @@ except Exception as exc:
                     throw "Wrap strategy missing {CORE_TEMPLATE} placeholder"
                 }
                 $content = $layerContent.Replace('{CORE_TEMPLATE}', $content)
+            }
+            'replace-section' {
+                $content = Invoke-ReplaceTemplateSection -Content $content -Section $layerSections[$i] -LayerPath $path -PyCmd $pyCmd
             }
             default { throw "Unknown strategy: $strat" }
         }

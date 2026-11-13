@@ -567,3 +567,71 @@ class TestCompositionStrategyValidation:
             yaml.dump(valid_pack_data, f)
         manifest = PresetManifest(manifest_path)
         assert manifest.templates[0]["strategy"] == "prepend"
+
+
+class TestReplaceSectionValidation:
+    """Manifest rules for the replace-section strategy."""
+
+    @staticmethod
+    def _write(temp_dir, valid_pack_data, **entry):
+        valid_pack_data["provides"]["templates"][0].update(entry)
+        manifest_path = temp_dir / "preset.yml"
+        with open(manifest_path, "w") as f:
+            yaml.dump(valid_pack_data, f)
+        (temp_dir / "templates").mkdir(exist_ok=True)
+        (temp_dir / "templates" / "spec-template.md").write_text("body")
+        return manifest_path
+
+    def test_accepted_with_section(self, temp_dir, valid_pack_data):
+        path = self._write(
+            temp_dir,
+            valid_pack_data,
+            strategy="Replace-Section",
+            section="User Scenarios & Testing",
+        )
+        manifest = PresetManifest(path)
+        assert manifest.templates[0]["strategy"] == "replace-section"
+        assert manifest.templates[0]["section"] == "User Scenarios & Testing"
+
+    @pytest.mark.parametrize(
+        "section",
+        [None, "", "   ", 42, ["Requirements"], "Two\nlines", "Tab\there"],
+        ids=["missing", "empty", "blank", "int", "list", "newline", "tab"],
+    )
+    def test_rejected_without_usable_section(
+        self, temp_dir, valid_pack_data, section
+    ):
+        entry = {"strategy": "replace-section"}
+        if section is not None:
+            entry["section"] = section
+        path = self._write(temp_dir, valid_pack_data, **entry)
+        with pytest.raises(PresetValidationError, match="needs 'section'"):
+            PresetManifest(path)
+
+    def test_rejected_for_commands(self, temp_dir, valid_pack_data):
+        valid_pack_data["provides"]["templates"] = [{
+            "type": "command",
+            "name": "speckit.specify",
+            "file": "commands/speckit.specify.md",
+            "strategy": "replace-section",
+            "section": "Outline",
+        }]
+        manifest_path = temp_dir / "preset.yml"
+        with open(manifest_path, "w") as f:
+            yaml.dump(valid_pack_data, f)
+        with pytest.raises(PresetValidationError, match="only templates support it"):
+            PresetManifest(manifest_path)
+
+    def test_rejected_for_scripts(self, temp_dir, valid_pack_data):
+        valid_pack_data["provides"]["templates"] = [{
+            "type": "script",
+            "name": "create-new-feature",
+            "file": "scripts/create-new-feature.sh",
+            "strategy": "replace-section",
+            "section": "Main",
+        }]
+        manifest_path = temp_dir / "preset.yml"
+        with open(manifest_path, "w") as f:
+            yaml.dump(valid_pack_data, f)
+        with pytest.raises(PresetValidationError, match="for script"):
+            PresetManifest(manifest_path)

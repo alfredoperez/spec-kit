@@ -138,7 +138,7 @@ For command, template, and script artifacts, `stack` is ordered by resolution pr
 | `sourceId`     | Installed preset or extension ID used by the resolver, or `null` when the layer has no provenance |
 | `presetId`     | Preset pack directory id; `null` on built-in, `project`, and `extension` rows       |
 | `presetName`   | Preset display name when its manifest declares one, else the pack id; `null` when `presetId` is `null` |
-| `strategy`     | `replace`, `wrap`, `prepend`, `append`, or `additive`                              |
+| `strategy`     | `replace`, `wrap`, `prepend`, `append`, `replace-section`, or `additive`           |
 | `active`       | Whether the layer is active; for named artifacts this is `true` only at index `0` |
 | `hidden`       | `true` when a lower-index `replace` layer cuts this layer out of the composition |
 | `manifestPath` | Project-relative path to the declaring manifest, or `null` when none applies      |

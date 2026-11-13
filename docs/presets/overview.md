@@ -89,9 +89,10 @@ Presets can augment lower layers instead of replacing them:
 | `prepend` | Put this layer before the lower-priority content |
 | `append` | Put this layer after the lower-priority content |
 | `wrap` | Insert lower-priority content at a placeholder in this layer |
+| `replace-section` | Replace the body of one named section of the lower-priority template |
 
-Templates and commands support all four strategies. Scripts support only
-`replace` and `wrap`. Composition needs a lower `replace` base; a wrapper
+Templates support all five strategies. Commands support all but
+`replace-section`. Scripts support only `replace` and `wrap`. Composition needs a lower `replace` base; a wrapper
 must contain the appropriate placeholder. The API reference defines the
 exact rules.
 

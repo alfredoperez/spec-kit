@@ -39,6 +39,8 @@ provides:
     #   append   - Places this content AFTER the lower-priority template
     #   wrap     - Uses {CORE_TEMPLATE} placeholder (templates/commands) or
     #              $CORE_SCRIPT placeholder (scripts), replaced with lower-priority content
+    #   replace-section - Replaces the body of the one section whose heading is
+    #              `section:` (templates only), keeping the heading
     #
     # Note: Scripts only support "replace" and "wrap" strategies.
     - type: "template"
